@@ -33,7 +33,7 @@ def companion_matrix(weights: List[np.ndarray]) -> np.ndarray:
     return C
 
 
-def check_stability(weights: List[np.ndarray], max_spectral_radius: float = 0.95) -> bool:
+def check_stability(weights: List[np.ndarray], max_spectral_radius=0.95, min_spectral_radius=0.5) -> bool:
     """
     Check if AR(p) process is stable by computing spectral radius of companion matrix.
 
@@ -47,42 +47,72 @@ def check_stability(weights: List[np.ndarray], max_spectral_radius: float = 0.95
     C = companion_matrix(weights)
     eigenvalues = np.linalg.eigvals(C)
     spectral_radius = np.max(np.abs(eigenvalues))
-    return spectral_radius < max_spectral_radius
+    return (min_spectral_radius < spectral_radius < max_spectral_radius)
 
+# def generate_stable_ar_weights(p: int, d: int,
+#                                max_attempts: int = 1000,
+#                                scale: float = 0.3,
+#                                max_spectral_radius: float = 0.95) -> List[np.ndarray]:
+#     """
+#     Generate stable AR(p) weight matrices.
 
-def generate_stable_ar_weights(p: int, d: int,
-                               max_attempts: int = 1000,
-                               scale: float = 0.3,
-                               max_spectral_radius: float = 0.95) -> List[np.ndarray]:
-    """
-    Generate stable AR(p) weight matrices.
+#     Args:
+#         p: Order of AR process
+#         d: Dimension of state vector
+#         max_attempts: Maximum number of attempts to generate stable weights
+#         scale: Scale parameter for random weight initialization
+#         max_spectral_radius: Maximum allowed spectral radius
 
-    Args:
-        p: Order of AR process
-        d: Dimension of state vector
-        max_attempts: Maximum number of attempts to generate stable weights
-        scale: Scale parameter for random weight initialization
-        max_spectral_radius: Maximum allowed spectral radius
+#     Returns:
+#         List of weight matrices [W1, W2, ..., Wp]
 
-    Returns:
-        List of weight matrices [W1, W2, ..., Wp]
+#     Raises:
+#         ValueError: If stable weights cannot be generated within max_attempts
+#     """
+#     for attempt in range(max_attempts):
+#         # Generate random weights with decreasing magnitude for higher lags
+#         weights = []
+#         for i in range(p):
+#             # Decay factor: higher lags get smaller weights
+#             decay = 1.0 / (i + 1)**0.5
+#             W = np.random.randn(d, d) * scale * decay
+#             weights.append(W)
 
-    Raises:
-        ValueError: If stable weights cannot be generated within max_attempts
-    """
+#         if check_stability(weights, max_spectral_radius):
+#             return weights
+
+#     raise ValueError(f"Could not generate stable AR({p}) weights after {max_attempts} attempts")
+
+def generate_ar_weights_with_target_radius(p, d,
+                                           base_scale=0.3,
+                                           rho_target=0.8,
+                                           max_attempts=1000):
     for attempt in range(max_attempts):
-        # Generate random weights with decreasing magnitude for higher lags
         weights = []
+        scale = base_scale / np.sqrt(max(p, 1))
         for i in range(p):
-            # Decay factor: higher lags get smaller weights
-            decay = 1.0 / (i + 1)**0.5
+            decay = 1.0 / (i + 1)**1.0
             W = np.random.randn(d, d) * scale * decay
             weights.append(W)
 
-        if check_stability(weights, max_spectral_radius):
-            return weights
+        C = companion_matrix(weights)
+        eigs = np.linalg.eigvals(C)
+        rho = np.max(np.abs(eigs))
 
-    raise ValueError(f"Could not generate stable AR({p}) weights after {max_attempts} attempts")
+        if rho == 0:
+            continue 
+        
+        alpha = rho_target / rho
+        scaled_weights = [alpha * W for W in weights]
+
+        C_scaled = companion_matrix(scaled_weights)
+        rho_scaled = np.max(np.abs(np.linalg.eigvals(C_scaled)))
+
+        if rho_scaled < 0.99:
+            return scaled_weights
+
+    raise ValueError("Could not generate weights with target radius")
+
 
 
 def generate_ar_sequence(weights: List[np.ndarray],
