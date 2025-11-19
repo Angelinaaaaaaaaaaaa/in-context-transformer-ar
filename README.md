@@ -26,8 +26,6 @@ python test_implementation.py
 python experiments/h1_scaling.py --p_values 1 2 --seeds 1 --n_train 1000 --n_val 200 --n_test 500
 ```
 
-See [QUICK_START.md](QUICK_START.md) for detailed quick start guide.
-
 ## Project Structure
 
 ```
@@ -115,46 +113,6 @@ python experiments/h3_mechanism.py --p 5
 - Selective ablation experiments
 - Publication-ready visualizations
 
-## Documentation
-
-- **[QUICK_START.md](QUICK_START.md)** - Get running in 5 minutes
-- **[USAGE.md](USAGE.md)** - Detailed usage guide and examples
-- **[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)** - Technical implementation details
-
-## Example Results
-
-After running H1 experiments, you'll see:
-
-```json
-{
-  "1": {
-    "mse_1step": 0.0145,
-    "rel_error_1step": 1.89
-  },
-  "2": {
-    "mse_1step": 0.0198,
-    "rel_error_1step": 1.94
-  },
-  "5": {
-    "mse_1step": 0.0312,
-    "rel_error_1step": 2.11
-  }
-}
-```
-
-Plots visualize performance degradation as p increases.
-
-## Computational Requirements
-
-**Full experiments (default settings):**
-- H1: ~300 GPU-hours (4 p values × 3 seeds)
-- H2: ~240 GPU-hours (4 p × 4 noise levels × 3 seeds)
-- H3: ~60 GPU-hours (1 p × 3 seeds)
-- **Total: ~600 GPU-hours**
-
-**Quick tests (1 seed, small datasets):**
-- All experiments: ~6 GPU-hours
-- Good for development and validation
 
 ## References
 
@@ -166,18 +124,6 @@ This implementation is based on:
 4. von Oswald, J. et al. (2023). "Transformers learn in-context by gradient descent"
 5. Zhang, A. et al. (2023). "Trained Transformers Learn Linear Models In-Context"
 
-## Citation
-
-If you use this code, please cite:
-
-```bibtex
-@misc{ar_icl_2024,
-  title={In-Context Learning of Higher-Order Autoregressive Processes},
-  author={[Your Name]},
-  year={2024},
-  howpublished={\url{https://github.com/yourusername/ar-icl}}
-}
-```
 
 ## License
 

@@ -1,0 +1,52 @@
+# -------------------------
+# OS / Editor junk
+# -------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# -------------------------
+# Python
+# -------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.pickle
+*.log
+
+# Virtual envs
+.venv/
+venv/
+env/
+.env/
+
+# -------------------------
+# Notebooks
+# -------------------------
+.ipynb_checkpoints/
+*.ipynb~
+
+# Model weights
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# -------------------------
+# Build / Dist
+# -------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# -------------------------
+# Ignore all Markdown except README
+# -------------------------
+*.md
+!README.md
