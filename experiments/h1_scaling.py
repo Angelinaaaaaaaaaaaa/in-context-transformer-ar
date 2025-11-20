@@ -106,9 +106,9 @@ def run_experiment(p: int,
         val_dataset=val_dataset,
         context_len=context_len,
         lr=3e-4,
-        batch_size=64,
-        max_epochs=100,
-        patience=10,
+        batch_size=3840,
+        max_epochs=20,
+        patience=5,
         device=device,
         save_dir=model_save_dir
     )
@@ -186,7 +186,7 @@ def aggregate_results(all_results: dict, p_values: list) -> dict:
 
     for p in p_values:
         # Gather metrics for this p across seeds
-        metrics_list = [all_results[(p, seed)] for seed in all_results.keys() if seed[0] == p]
+        metrics_list = [all_results[seed] for seed in all_results.keys() if seed[0] == p]
 
         if len(metrics_list) == 0:
             continue
