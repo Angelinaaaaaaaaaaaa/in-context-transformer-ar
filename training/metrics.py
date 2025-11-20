@@ -153,6 +153,7 @@ def compute_ilwd(implicit_weights: List[np.ndarray],
 def evaluate_model(
     model,
     test_sequences: torch.Tensor,
+    test_weights: List[List[np.ndarray]],
     context_len: int,
     p: int,
     oracle_predictor,

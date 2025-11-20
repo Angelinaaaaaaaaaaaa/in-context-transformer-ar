@@ -147,7 +147,7 @@ class GPTModel(nn.Module):
         d_input: int,
         d_model: int = 256,
         n_layers: int = 1,
-        n_heads: int = 4,
+        n_heads: int = 2,
         d_ff: int = 1024,
         max_seq_len: int = 512,
         dropout: float = 0.1,
