@@ -1,11 +1,12 @@
 """
 Decoder-only GPT architecture for in-context learning.
 
-Following Sander et al. (2024):
-- 6 layers, 8 heads, d_model=256, FFN=1024
+Config is flexible, but in our main experiments we often use:
+- 1 layer, 4 heads, d_model=256, FFN=1024
 - Learned positional encodings
 - Causal mask
 """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -32,9 +33,12 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.scale = math.sqrt(self.d_head)
 
-    def forward(self, x: torch.Tensor,
-                mask: Optional[torch.Tensor] = None,
-                return_attention: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        return_attention: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Args:
             x: Input tensor of shape (batch, seq_len, d_model)
@@ -43,7 +47,8 @@ class MultiHeadAttention(nn.Module):
 
         Returns:
             - output: Tensor of shape (batch, seq_len, d_model)
-            - attention_weights: If return_attention, tensor of shape (batch, n_heads, seq_len, seq_len)
+            - attention_weights: If return_attention, tensor of shape
+              (batch, n_heads, seq_len, seq_len)
         """
         batch_size, seq_len, d_model = x.shape
 
@@ -53,7 +58,9 @@ class MultiHeadAttention(nn.Module):
         V = self.v_proj(x)
 
         # Reshape for multi-head attention
-        Q = Q.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)  # (batch, n_heads, seq_len, d_head)
+        Q = Q.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(
+            1, 2
+        )  # (batch, n_heads, seq_len, d_head)
         K = K.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
         V = V.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
 
@@ -62,9 +69,9 @@ class MultiHeadAttention(nn.Module):
 
         # Apply causal mask
         if mask is not None:
-            scores = scores.masked_fill(mask == 0, float('-inf'))
+            scores = scores.masked_fill(mask == 0, float("-inf"))
 
-        # Softmax and dropout
+        # Softmax (dropout currently disabled)
         attn_weights = F.softmax(scores, dim=-1)  # (batch, n_heads, seq_len, seq_len)
         # attn_weights = self.dropout(attn_weights)
 
@@ -72,7 +79,9 @@ class MultiHeadAttention(nn.Module):
         attn_output = torch.matmul(attn_weights, V)  # (batch, n_heads, seq_len, d_head)
 
         # Concatenate heads
-        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(
+            batch_size, seq_len, d_model
+        )
 
         # Output projection
         output = self.out_proj(attn_output)
@@ -83,8 +92,6 @@ class MultiHeadAttention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    """Position-wise feed-forward network."""
-
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1):
         super().__init__()
         self.fc1 = nn.Linear(d_model, d_ff)
@@ -100,8 +107,6 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """Single Transformer decoder block."""
-
     def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float = 0.1):
         super().__init__()
         self.attention = MultiHeadAttention(d_model, n_heads, dropout)
@@ -110,18 +115,15 @@ class TransformerBlock(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor,
-                mask: Optional[torch.Tensor] = None,
-                return_attention: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # Self-attention with residual
-        # attn_output, attn_weights = self.attention(self.norm1(x), mask, return_attention)
-        attn_output, attn_weights = self.attention(x, mask, return_attention)
-        # x = x + self.dropout(attn_output)
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        return_attention: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
 
-        # Feed-forward with residual
-        # ff_output = self.ff(self.norm2(x))
+        attn_output, attn_weights = self.attention(x, mask, return_attention)
         x = self.norm2(attn_output)
-        # x = x + self.dropout(ff_output)
 
         return x, attn_weights
 
@@ -140,14 +142,16 @@ class GPTModel(nn.Module):
         dropout: Dropout rate
     """
 
-    def __init__(self,
-                 d_input: int,
-                 d_model: int = 256,
-                 n_layers: int = 6,
-                 n_heads: int = 8,
-                 d_ff: int = 1024,
-                 max_seq_len: int = 512,
-                 dropout: float = 0.1):
+    def __init__(
+        self,
+        d_input: int,
+        d_model: int = 256,
+        n_layers: int = 1,
+        n_heads: int = 4,
+        d_ff: int = 1024,
+        max_seq_len: int = 512,
+        dropout: float = 0.1,
+    ):
         super().__init__()
 
         self.d_input = d_input
@@ -163,10 +167,12 @@ class GPTModel(nn.Module):
         self.pos_encoding = nn.Embedding(max_seq_len, d_model)
 
         # Transformer blocks
-        self.blocks = nn.ModuleList([
-            TransformerBlock(d_model, n_heads, d_ff, dropout)
-            for _ in range(n_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                TransformerBlock(d_model, n_heads, d_ff, dropout)
+                for _ in range(n_layers)
+            ]
+        )
 
         # Output projection
         self.output_proj = nn.Linear(d_model, d_input)
@@ -194,9 +200,11 @@ class GPTModel(nn.Module):
         mask = torch.tril(torch.ones(seq_len, seq_len, device=device))
         return mask
 
-    def forward(self,
-                x: torch.Tensor,
-                return_attention: bool = False) -> Tuple[torch.Tensor, Optional[list]]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_attention: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[list]]:
         """
         Args:
             x: Input tensor of shape (batch, seq_len, d_input)
@@ -245,12 +253,9 @@ class GPTModel(nn.Module):
         """
         with torch.no_grad():
             output, _ = self.forward(context)
-            # Return prediction at last position
             return output[:, -1, :]
 
-    def autoregressive_predict(self,
-                              context: torch.Tensor,
-                              n_steps: int) -> torch.Tensor:
+    def autoregressive_predict(self, context: torch.Tensor, n_steps: int) -> torch.Tensor:
         """
         Generate n_steps predictions autoregressively.
 
@@ -261,10 +266,7 @@ class GPTModel(nn.Module):
         Returns:
             Predictions of shape (batch, n_steps, d_input)
         """
-        batch_size = context.shape[0]
         predictions = []
-
-        # Start with context
         current_seq = context
 
         for _ in range(n_steps):
@@ -272,52 +274,11 @@ class GPTModel(nn.Module):
             next_state = self.predict_next(current_seq)  # (batch, d_input)
             predictions.append(next_state)
 
-            # Append to sequence (keep only last max_seq_len-1 to make room for new prediction)
             next_state = next_state.unsqueeze(1)  # (batch, 1, d_input)
             current_seq = torch.cat([current_seq, next_state], dim=1)
 
             if current_seq.shape[1] > self.max_seq_len:
-                current_seq = current_seq[:, -self.max_seq_len:, :]
+                current_seq = current_seq[:, -self.max_seq_len :, :]
 
-        predictions = torch.stack(predictions, dim=1)  # (batch, n_steps, d_input)
+        predictions = torch.stack(predictions, dim=1)
         return predictions
-
-
-if __name__ == "__main__":
-    # Test model
-    print("Testing model...")
-
-    batch_size = 4
-    seq_len = 50
-    d_input = 5
-
-    # Create model
-    model = GPTModel(
-        d_input=d_input,
-        d_model=256,
-        n_layers=6,
-        n_heads=8,
-        d_ff=1024,
-        max_seq_len=512,
-        dropout=0.1
-    )
-
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    # Test forward pass
-    x = torch.randn(batch_size, seq_len, d_input)
-    output, attention_weights = model(x, return_attention=True)
-
-    print(f"Input shape: {x.shape}")
-    print(f"Output shape: {output.shape}")
-    print(f"Number of attention weight tensors: {len(attention_weights)}")
-    print(f"Attention weight shape: {attention_weights[0].shape}")
-
-    # Test prediction
-    context = torch.randn(batch_size, 20, d_input)
-    next_state = model.predict_next(context)
-    print(f"\nNext state prediction shape: {next_state.shape}")
-
-    # Test autoregressive prediction
-    predictions = model.autoregressive_predict(context, n_steps=10)
-    print(f"Autoregressive predictions shape: {predictions.shape}")

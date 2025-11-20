@@ -1,72 +1,55 @@
 """
-AR(p) process generation with stability checks and non-zero mean.
-
-Key design goals:
-- Stable AR(p) dynamics via companion-matrix spectral radius control
-- All lags have comparable strength (no artificial decay)
-- Non-zero mean level so sequences are not clustered near 0
-- Dataset can be made "challenging" for simple zero-mean AR fits
+AR(p) process generation with stability checks.
 """
+import numpy as np
+from typing import List, Tuple, Optional, Dict
+import warnings
 
 import numpy as np
 from typing import List, Tuple, Optional
-import warnings  # kept in case you want to warn on edge cases
+import warnings
 
-# Global configuration: target mean level for the stationary distribution.
-# Signatures must stay fixed, so we expose this via a module-level constant.
-TARGET_MEAN_LEVEL: float = 10.0
-
-
-# =========================
-# 1. Linear-algebra helpers
-# =========================
+# Global Configuration: Set target mean level to prevent data from being close to 0.
+# Since function signatures cannot be changed, we control the offset via this module-level constant.
+TARGET_MEAN_LEVEL = 10.0 
 
 def companion_matrix(weights: List[np.ndarray]) -> np.ndarray:
     """
-    Construct the companion matrix for an AR(p) process.
+    Construct companion matrix for AR(p) process.
 
     Args:
-        weights: List of weight matrices [W1, W2, ..., Wp], each (d, d).
+        weights: List of weight matrices [W1, W2, ..., Wp], each of shape (d, d)
 
     Returns:
-        Companion matrix C of shape (p*d, p*d) such that the stacked state
-        [s_t, s_{t-1}, ..., s_{t-p+1}] evolves linearly via C.
+        Companion matrix of shape (p*d, p*d)
     """
     p = len(weights)
-    if p == 0:
-        raise ValueError("At least one weight matrix is required (p >= 1).")
-
     d = weights[0].shape[0]
+
+    # Create companion matrix
     C = np.zeros((p * d, p * d))
 
-    # First block row: [W1, W2, ..., Wp]
+    # First row: [W1, W2, ..., Wp]
     for i, W in enumerate(weights):
-        if W.shape != (d, d):
-            raise ValueError(f"All weight matrices must be ({d}, {d}), got {W.shape}.")
-        C[:d, i * d:(i + 1) * d] = W
+        C[:d, i*d:(i+1)*d] = W
 
-    # Lower block rows: shift identity (stacked state shift)
+    # Identity blocks for lower rows
     if p > 1:
-        # This creates:
-        # [ I_d  0   ...  0 ]
-        # [ 0    I_d ...  0 ]
-        # ...
-        C[d:, :d * (p - 1)] = np.eye(d * (p - 1))
+        C[d:, :d*(p-1)] = np.eye(d * (p-1))
 
     return C
 
 
-def check_stability(weights: List[np.ndarray],
-                    max_spectral_radius: float = 0.95) -> bool:
+def check_stability(weights: List[np.ndarray], max_spectral_radius: float = 0.95) -> bool:
     """
-    Check stability of an AR(p) process via the spectral radius of its companion matrix.
+    Check if AR(p) process is stable by computing spectral radius of companion matrix.
 
     Args:
-        weights: List of weight matrices [W1, W2, ..., Wp].
-        max_spectral_radius: Maximum allowed spectral radius for stability.
+        weights: List of weight matrices [W1, W2, ..., Wp]
+        max_spectral_radius: Maximum allowed spectral radius for stability
 
     Returns:
-        True if spectral radius < max_spectral_radius, else False.
+        True if stable (spectral radius < max_spectral_radius)
     """
     C = companion_matrix(weights)
     eigenvalues = np.linalg.eigvals(C)
@@ -74,52 +57,34 @@ def check_stability(weights: List[np.ndarray],
     return spectral_radius < max_spectral_radius
 
 
-# =========================
-# 2. Weight generation
-# =========================
-
-def generate_stable_ar_weights(
-    p: int,
-    d: int,
-    max_attempts: int = 1000,     # kept for API compatibility (unused)
-    scale: float = 0.5,           # kept for API compatibility (we use internal base_std)
-    max_spectral_radius: float = 0.95
-) -> List[np.ndarray]:
+def generate_stable_ar_weights(p: int, d: int,
+                               max_attempts: int = 1000,
+                               scale: float = 0.5,
+                               max_spectral_radius: float = 0.95) -> List[np.ndarray]:
     """
-    Generate stable AR(p) weights with COMPARABLE lag strengths.
-
-    Design:
-    - All lags are sampled from the same distribution (no artificial decay).
-    - We then compute the companion matrix spectral radius r_old.
-    - To adjust to a target radius r_new, we scale A_k by (r_new / r_old)^(k+1),
-      which is a practical scaling scheme to match the desired radius.
+    Generate stable AR(p) weight matrices with COMPARABLE LAGS.
+    
+    Changes from original:
+    1. Removed 'decay': Lag p is just as strong as Lag 1 (Challenging).
+    2. Uses lambda^k scaling to enforce exact spectral radius without destroying structure.
 
     Args:
-        p: AR order.
-        d: State dimension.
-        max_attempts: Unused, kept only for interface compatibility.
-        scale: Unused in the core logic, base_std is auto-scaled by (d, p).
-        max_spectral_radius: Target spectral radius (< 1 for stability).
+        p: Order of AR process
+        d: Dimension of state vector
+        max_attempts: (Unused, kept for API compatibility)
+        scale: Initial variance scale
+        max_spectral_radius: Target spectral radius
 
     Returns:
-        List [W1, ..., Wp] of shape (d, d) matrices.
+        List of weight matrices [W1, W2, ..., Wp]
     """
-    if p <= 0:
-        raise ValueError("AR order p must be >= 1.")
-    if d <= 0:
-        raise ValueError("Dimension d must be >= 1.")
-    if max_spectral_radius <= 0 or max_spectral_radius >= 1:
-        warnings.warn(
-            f"max_spectral_radius={max_spectral_radius} is unusual. "
-            f"Typical stable values are in (0, 1).",
-            RuntimeWarning,
-        )
-
-    # 1. Random initial weights (same distribution for all lags)
-    weights: List[np.ndarray] = []
-    base_std = 1.0 / np.sqrt(d * p)  # keeps eigenvalues in a reasonable range
-
-    for _ in range(p):
+    # 1. Generate random weights from SAME distribution for all lags
+    # We normalize by sqrt(d*p) to keep initial eigenvalues reasonable
+    weights = []
+    base_std = 1.0 / np.sqrt(d * p)
+    
+    for i in range(p):
+        # CRITICAL: No decay factor here. W_p is comparable to W_1.
         W = np.random.randn(d, d) * base_std
         weights.append(W)
 
@@ -128,98 +93,80 @@ def generate_stable_ar_weights(
     eigenvalues = np.linalg.eigvals(C)
     current_radius = np.max(np.abs(eigenvalues))
 
-    if current_radius <= 0:
-        # Extremely degenerate case; avoid division by zero
+    if current_radius == 0:
         current_radius = 1e-6
 
-    # 3. Adjust spectral radius using λ-scaling across lags
+    # 3. Strict Spectral Radius Adjustment
+    # To change radius from r_old to r_new, we must scale A_k by (r_new/r_old)^k
+    # This is the mathematically correct way to adjust radius for AR(p)
     target_radius = max_spectral_radius
     lambda_factor = target_radius / current_radius
-
-    final_weights: List[np.ndarray] = []
+    
+    final_weights = []
     for k in range(p):
-        # Scale A_{k+1} by λ^(k+1)
+        # Scale A_{k+1} by lambda^(k+1)
         scale_k = lambda_factor ** (k + 1)
         final_weights.append(weights[k] * scale_k)
 
     return final_weights
 
 
-# =========================
-# 3. Sequence generation
-# =========================
-
-def generate_ar_sequence(
-    weights: List[np.ndarray],
-    T: int,
-    noise_std: float = 1.0,
-    initial_states: Optional[np.ndarray] = None,
-    seed: Optional[int] = None
-) -> np.ndarray:
+def generate_ar_sequence(weights: List[np.ndarray],
+                        T: int,
+                        noise_std: float = 1.0,
+                        initial_states: Optional[np.ndarray] = None,
+                        seed: Optional[int] = None) -> np.ndarray:
     """
-    Generate a sequence from an AR(p) process with a non-zero mean.
-
-    Model:
-        s_t = c + Σ_{i=1}^p W_i s_{t-i} + ε_t
-    where:
-        - c is chosen so that the process has stationary mean ≈ TARGET_MEAN_LEVEL.
-        - ε_t ~ N(0, noise_std^2 I_d)
-
-    We also use a burn-in period to reach stationarity.
+    Generate a sequence from AR(p) process.
+    
+    Changes from original:
+    1. Injects a Bias term to ensure data is NOT CLOSE TO 0.
+    2. Calculates bias based on TARGET_MEAN_LEVEL.
 
     Args:
-        weights: List of weight matrices [W1, ..., Wp], each (d, d).
-        T: Desired sequence length (returned after burn-in).
-        noise_std: Standard deviation of Gaussian noise.
-        initial_states: Optional array (p, d) for the first p states.
-        seed: Optional random seed.
+        weights: List of weight matrices [W1, W2, ..., Wp]
+        T: Length of sequence
+        noise_std: Noise standard deviation
+        initial_states: Initial states
+        seed: Random seed
 
     Returns:
-        Sequence array of shape (T, d).
+        Sequence of shape (T, d)
     """
     if seed is not None:
         np.random.seed(seed)
 
     p = len(weights)
-    if p == 0:
-        raise ValueError("At least one weight matrix is required (p >= 1).")
-
     d = weights[0].shape[0]
-    if T <= p:
-        raise ValueError(f"Sequence length T={T} must be greater than p={p}.")
-
-    # Burn-in for stabilizing around the stationary mean
+    
+    # Burn-in to stabilize the process around the mean
     burn_in = 500
     total_T = T + burn_in
 
-    # ---- 1. Compute bias c to enforce non-zero stationary mean μ ----
-    # Stationary mean μ satisfies:
-    #   μ = c + (Σ W_i) μ  =>  c = (I - Σ W_i) μ
-    sum_weights = np.sum(weights, axis=0)          # (d, d)
-    target_mu = np.ones(d) * TARGET_MEAN_LEVEL     # target mean per coordinate
-    bias_vector = (np.eye(d) - sum_weights) @ target_mu  # (d,)
+    # 1. Calculate Bias Vector to force Non-Zero Mean
+    # Formula: c = (I - sum(A_i)) * mu
+    sum_weights = np.sum(weights, axis=0)
+    target_mu = np.ones(d) * TARGET_MEAN_LEVEL
+    # Bias vector c
+    bias_vector = (np.eye(d) - sum_weights) @ target_mu
 
-    # ---- 2. Initialize sequence ----
+    # Initialize sequence
     sequence = np.zeros((total_T, d))
 
+    # Set initial states
+    # If none provided, initialize around the target mean, not 0
     if initial_states is None:
-        # Initialize around target mean, not near 0
         sequence[:p] = target_mu + np.random.randn(p, d) * noise_std
     else:
-        if initial_states.shape != (p, d):
-            raise ValueError(
-                f"initial_states must have shape ({p}, {d}), got {initial_states.shape}"
-            )
         sequence[:p] = initial_states
 
-    # ---- 3. Simulate AR(p) dynamics ----
+    # Generate sequence
     for t in range(p, total_T):
-        # Start with bias
-        s_t = bias_vector.copy()
-
-        # Add AR contributions
+        # AR dynamics: s_t = c + sum(W_i * s_{t-i}) + noise
+        s_t = bias_vector.copy() # Start with bias
+        
         for i, W in enumerate(weights):
-            # weights[0] corresponds to lag 1 => s_{t-1}
+            # weights[0] is lag 1, so index is t-1
             s_t += W @ sequence[t - i - 1]
 
         # Add noise
@@ -228,155 +175,120 @@ def generate_ar_sequence(
 
         sequence[t] = s_t
 
-    # ---- 4. Drop burn-in and return ----
+    # Return only the valid sequence after burn-in
     return sequence[burn_in:]
 
 
-# =========================
-# 4. Dataset generation
-# =========================
-
-def generate_ar_dataset(
-    n_sequences: int,
-    p: int,
-    d: int,
-    T: int,
-    noise_std: float = 1.0,
-    same_dynamics: bool = True,
-    seed: Optional[int] = None
-) -> Tuple[np.ndarray, List[List[np.ndarray]]]:
+def generate_ar_dataset(n_sequences: int,
+                       p: int,
+                       d: int,
+                       T: int,
+                       noise_std: float = 1.0,
+                       same_dynamics: bool = True,
+                       seed: Optional[int] = None) -> Tuple[np.ndarray, List[List[np.ndarray]]]:
     """
-    Generate a dataset of AR(p) sequences.
-
-    Args:
-        n_sequences: Number of sequences.
-        p: AR order.
-        d: State dimension.
-        T: Sequence length (per sequence).
-        noise_std: Noise std for each process.
-        same_dynamics:
-            - True: All sequences share the same [W1, ..., Wp].
-            - False: Each sequence has its own independently sampled weights.
-        seed: Optional global seed.
-
-    Returns:
-        sequences: Array of shape (n_sequences, T, d).
-        weights_list: List of length n_sequences; each entry is [W1, ..., Wp].
+    Generate dataset of AR(p) sequences.
+    (Wrapper function, logic remains largely same but calls updated generators)
     """
     if seed is not None:
         np.random.seed(seed)
 
     sequences = np.zeros((n_sequences, T, d))
-    weights_list: List[List[np.ndarray]] = []
+    weights_list = []
 
+    # Generate weights
     if same_dynamics:
-        base_weights = generate_stable_ar_weights(p, d, max_spectral_radius=0.95)
-        # Use copies so each sequence has its own weight matrices (no shared references)
-        for _ in range(n_sequences):
-            weights_list.append([W.copy() for W in base_weights])
+        weights = generate_stable_ar_weights(p, d)
+        weights_list = [weights] * n_sequences
     else:
-        for _ in range(n_sequences):
-            weights = generate_stable_ar_weights(p, d, max_spectral_radius=0.95)
+        for i in range(n_sequences):
+            weights = generate_stable_ar_weights(p, d)
             weights_list.append(weights)
 
-    # Generate each sequence
+    # Generate sequences
     for i in range(n_sequences):
-        seq_seed = None if seed is None else seed + i
         sequences[i] = generate_ar_sequence(
             weights_list[i],
             T=T,
             noise_std=noise_std,
-            seed=seq_seed
+            seed=None if seed is None else seed + i
         )
 
     return sequences, weights_list
 
 
-# =========================
-# 5. AR(p) least-squares fit (oracle)
-# =========================
-
 def compute_ar_fit_loss(sequence: np.ndarray, p: int) -> Tuple[float, List[np.ndarray]]:
     """
-    Fit a zero-intercept AR(p) model to a single sequence and compute MSE.
-
-    IMPORTANT:
-        - The generator now has a non-zero mean (bias).
-        - Here we fit a model WITHOUT an intercept (Y = XW),
-          so the fit will naturally have higher loss.
-        - This is intentional: it makes the dataset "challenging" for naive AR fits.
-
-    Args:
-        sequence: Array of shape (T, d).
-        p: AR order.
-
-    Returns:
-        loss: Mean squared error of LS fit on one-step predictions.
-        fitted_weights: List [W1, ..., Wp] each (d, d).
+    Fit AR(p) model to sequence.
+    
+    Note: Because the generated data now has a Non-Zero Mean (Bias), 
+    a standard Zero-Mean AR fit (Y = XW) will naturally have a higher loss.
+    This is expected and desired for 'Challenging' datasets.
     """
     T, d = sequence.shape
+
     if T <= p:
-        raise ValueError(f"Sequence length {T} must be greater than AR order {p}.")
+        raise ValueError(f"Sequence length {T} must be greater than AR order {p}")
 
-    X_list = []
-    Y_list = []
+    X = []
+    Y = []
 
-    # Build design matrix X and target Y
     for t in range(p, T):
-        # Concatenate states [s_{t-1}, s_{t-2}, ..., s_{t-p}]
-        x_t = np.concatenate([sequence[t - i - 1] for i in range(p)])  # (p*d,)
-        X_list.append(x_t)
-        Y_list.append(sequence[t])
+        x_t = np.concatenate([sequence[t - i - 1] for i in range(p)])
+        X.append(x_t)
+        Y.append(sequence[t])
 
-    X = np.array(X_list)  # (T-p, p*d)
-    Y = np.array(Y_list)  # (T-p, d)
+    X = np.array(X)  # (T-p, p*d)
+    Y = np.array(Y)  # (T-p, d)
 
-    # Least squares: Y ≈ X @ W_flat
-    # W_flat: (p*d, d), block rows correspond to lags
-    W_flat, *_ = np.linalg.lstsq(X, Y, rcond=None)
+    # Solve least squares: Y = X @ W_flat^T
+    # Note: We are purposely NOT fitting an intercept here to maintain API consistency
+    # and to show the "challenge" of the biased data.
+    W_flat = np.linalg.lstsq(X, Y, rcond=None)[0].T
 
-    # Predict and compute loss
-    Y_pred = X @ W_flat  # (T-p, d)
+    Y_pred = X @ W_flat.T
     loss = np.mean((Y - Y_pred) ** 2)
 
-    # Recover [W1, ..., Wp] from block rows of W_flat
-    fitted_weights: List[np.ndarray] = []
+    fitted_weights = []
     for i in range(p):
-        # Block of rows corresponding to lag i+1
-        W_i_T = W_flat[i * d:(i + 1) * d, :]  # (d, d), this is W_i^T
-        W_i = W_i_T.T                          # (d, d)
+        W_i = W_flat[:, i*d:(i+1)*d]
         fitted_weights.append(W_i)
 
     return loss, fitted_weights
 
 
-# =========================
-# 6. Verification script
-# =========================
-
 if __name__ == "__main__":
+    # ==========================================
+    # Verification Script
+    # ==========================================
+    
+    # 1. High dimension, Long lag, Challenging
     p_test, d_test, T_test = 10, 10, 200
-    print(f"Testing challenging AR({p_test}) process with dim={d_test}...")
-
+    print(f"Testing Challenging AR({p_test}) process with Dim={d_test}...")
+    
+    # Generate weights
     weights = generate_stable_ar_weights(p_test, d_test, max_spectral_radius=0.98)
-
+    
+    # Verify spectral radius
     C = companion_matrix(weights)
     rad = np.max(np.abs(np.linalg.eigvals(C)))
-    print(f"Spectral radius: {rad:.4f} (target ≈ 0.98)")
-
+    print(f"Spectral Radius: {rad:.4f} (Target ~0.98)")
+    
+    # Verify comparability between lags
+    print("Weight Norms (Should be comparable, not decaying to zero):")
     norms = [np.linalg.norm(w) for w in weights]
-    print("Weight norms (should be comparable across lags):")
-    print(f"  Lag 1 norm:  {norms[0]:.4f}")
-    print(f"  Lag {p_test} norm: {norms[-1]:.4f}")
-
+    print(f"  Lag 1: {norms[0]:.4f}")
+    print(f"  Lag {p_test}: {norms[-1]:.4f}")
+    
+    # Generate data
     seq = generate_ar_sequence(weights, T_test, noise_std=1.0)
-
+    
+    # Verify data is not close to 0
     mean_val = np.mean(seq)
-    print(f"Data mean level: {mean_val:.2f} (target ≈ {TARGET_MEAN_LEVEL})")
-    print(f"Data min value:  {np.min(seq):.2f}")
-
-    loss, fitted = compute_ar_fit_loss(seq, p_test)
-    print(f"Fit loss (zero-mean assumption): {loss:.4f}")
-    print(f"Recovered W1 norm:  {np.linalg.norm(fitted[0]):.4f}")
-    print(f"Recovered Wp norm: {np.linalg.norm(fitted[-1]):.4f}")
-    print("Note: Higher loss is expected because the true process has a bias term.")
+    print(f"Data Mean Level: {mean_val:.2f} (Target ~{TARGET_MEAN_LEVEL})")
+    print(f"Data Min Value: {np.min(seq):.2f}")
+    
+    # Fit loss
+    loss, _ = compute_ar_fit_loss(seq, p_test)
+    print(f"Fit Loss (Zero-Mean Assumption): {loss:.4f}")
+    print("Note: High loss is expected because data has a bias/intercept term.")
