@@ -75,7 +75,7 @@ def run_experiment(p: int,
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    data_dir = 'data/data_cache'
+    data_dir = 'data/data_cach_h1'
     # --- LOAD DATA ---
     # Reads from: data/data_cache/ar_p{p}_seed{seed}_{split}.pt
     train_sequences, train_weights = load_dataset(data_dir, p, seed, "train")
