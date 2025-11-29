@@ -1,24 +1,12 @@
-"""
-Evaluation metrics for in-context learning:
-- MSE (1-step and n-step rollout)
-- SPD (Squared Parameter Distance)
-- ILWD (Implicit Learning Weight Distance)
-"""
-import torch
-import numpy as np
 from typing import List, Tuple, Optional
+
+import numpy as np
+import torch
 
 
 def compute_mse(predictions: torch.Tensor, targets: torch.Tensor) -> float:
     """
     Compute mean squared error.
-
-    Args:
-        predictions: Predictions of shape (batch, ..., d) or (batch, d)
-        targets: Targets of same shape as predictions
-
-    Returns:
-        MSE value as a Python float
     """
     return torch.mean((predictions - targets) ** 2).item()
 
@@ -26,13 +14,6 @@ def compute_mse(predictions: torch.Tensor, targets: torch.Tensor) -> float:
 def compute_relative_error(model_mse: float, oracle_mse: float) -> float:
     """
     Compute relative error compared to oracle.
-
-    Args:
-        model_mse: MSE of the model
-        oracle_mse: MSE of oracle baseline
-
-    Returns:
-        Relative error (model_mse / oracle_mse)
     """
     if oracle_mse == 0:
         return float("inf") if model_mse > 0 else 1.0
@@ -47,36 +28,25 @@ def extract_implicit_weights(
     """
     Extract implicit AR(p) weights learned by the model using gradient analysis.
 
-    Follows the idea of Akyürek et al. (2022) / von Oswald et al. (2023):
-    approximate W_i via the Jacobian of the next prediction w.r.t. the
+    We approximate W_i via the Jacobian of the next prediction w.r.t. the
     state at lag i.
-
-    Args:
-        model: Trained model. Must support forward(context) -> (output, ...)
-        context: Tensor of shape (1, context_len, d)
-        p: Order of AR process
-
-    Returns:
-        List of implicit weight matrices [W1, ..., Wp], each (d, d) as np.ndarray.
     """
     model.eval()
     device = context.device
     d = context.shape[-1]
 
-    # Ensure context requires gradient
-    context = context.clone().detach().requires_grad_(True)
+    context = context.clone().detach().to(device).requires_grad_(True)
 
     # Forward pass to get next-step prediction (1, d)
     with torch.enable_grad():
-        output, _ = model(context)
-        next_pred = output[:, -1, :]  # (1, d)
+        out = model(context)
+        output = out[0] if isinstance(out, tuple) else out
+        next_pred = output[:, -1, :]
 
     implicit_weights: List[np.ndarray] = []
 
-    # For each lag i, compute Jacobian d(next_pred) / d(s_{t-i})
     for i in range(p):
         if context.shape[1] <= i:
-            # Not enough context for this lag
             implicit_weights.append(np.zeros((d, d)))
             continue
 
@@ -84,16 +54,13 @@ def extract_implicit_weights(
         jacobian = torch.zeros(d, d, device=device)
 
         for dim in range(d):
-            # Clear gradients on context before each backward call
             if context.grad is not None:
                 context.grad.zero_()
             if hasattr(model, "zero_grad"):
                 model.zero_grad(set_to_none=True)
 
-            # Backprop one output dimension
             next_pred[0, dim].backward(retain_graph=True)
 
-            # Gradient of that dim w.r.t. the chosen past state
             if context.grad is not None:
                 jacobian[dim, :] = context.grad[0, state_idx, :].clone()
 
@@ -105,49 +72,67 @@ def extract_implicit_weights(
 def compute_spd(true_weights: List[np.ndarray],
                 learned_weights: List[np.ndarray]) -> float:
     """
-    Compute Squared Parameter Distance (SPD).
-
     SPD = sum_i ||W_i - W_i^*||_F^2
-
-    Args:
-        true_weights: List of ground-truth weight matrices
-        learned_weights: List of learned weight matrices
-
-    Returns:
-        SPD value
     """
-    assert len(true_weights) == len(learned_weights), "Weight lists must have same length"
-
+    if len(true_weights) != len(learned_weights):
+        raise ValueError("Weight lists must have same length for SPD.")
     spd = 0.0
-    for W_true, W_learned in zip(true_weights, learned_weights):
-        diff = W_true - W_learned
-        spd += float(np.sum(diff ** 2))  # Frobenius norm squared
-
+    for w_true, w_learned in zip(true_weights, learned_weights):
+        diff = np.asarray(w_true) - np.asarray(w_learned)
+        spd += float(np.sum(diff ** 2))
     return spd
 
 
 def compute_ilwd(implicit_weights: List[np.ndarray],
                  ols_weights: List[np.ndarray]) -> float:
     """
-    Compute Implicit Learning Weight Distance (ILWD).
-
     ILWD = sum_i ||W_i^implicit - W_i^OLS||_F^2
-
-    Args:
-        implicit_weights: List of implicit weight matrices from model
-        ols_weights: List of OLS-fitted weight matrices
-
-    Returns:
-        ILWD value
     """
-    assert len(implicit_weights) == len(ols_weights), "Weight lists must have same length"
-
+    if len(implicit_weights) != len(ols_weights):
+        raise ValueError("Weight lists must have same length for ILWD.")
     ilwd = 0.0
-    for W_implicit, W_ols in zip(implicit_weights, ols_weights):
-        diff = W_implicit - W_ols
-        ilwd += float(np.sum(diff ** 2))  # Frobenius norm squared
-
+    for w_imp, w_ols in zip(implicit_weights, ols_weights):
+        diff = np.asarray(w_imp) - np.asarray(w_ols)
+        ilwd += float(np.sum(diff ** 2))
     return ilwd
+
+
+def fit_ols_weights_from_context(
+    context: np.ndarray,
+    p: int,
+) -> List[np.ndarray]:
+    """
+    Fit AR(p) weights W_i via least squares using one context window.
+
+    We solve s_t = sum_i W_i s_{t-i} + eps for t >= p.
+    """
+    T_ctx, d = context.shape
+    if T_ctx <= p:
+        raise ValueError(f"Context length {T_ctx} must be larger than p={p}.")
+
+    X_rows = []
+    Y_rows = []
+
+    for t in range(p, T_ctx):
+        y_t = context[t]
+        lags = [context[t - i] for i in range(1, p + 1)]
+        x_t = np.concatenate(lags, axis=-1)
+        X_rows.append(x_t)
+        Y_rows.append(y_t)
+
+    X = np.stack(X_rows, axis=0)
+    Y = np.stack(Y_rows, axis=0)
+    coef, *_ = np.linalg.lstsq(X, Y, rcond=None) 
+    W_concat = coef.T
+
+    ols_weights: List[np.ndarray] = []
+    for i in range(p):
+        start = i * d
+        end = (i + 1) * d
+        W_i = W_concat[:, start:end]
+        ols_weights.append(W_i)
+
+    return ols_weights
 
 
 def evaluate_model(
@@ -164,46 +149,38 @@ def evaluate_model(
     Comprehensive evaluation of model performance.
 
     Assumes:
-    - `oracle_predictor` and `ols_predictor` operate on the *same dynamics*
-      as the test set (e.g., shared AR weights across sequences), OR
-      are implemented to handle the batch as given.
-
-    Args:
-        model: Model to evaluate (must support autoregressive_predict).
-        test_sequences: Tensor of shape (n_test, T, d)
-        context_len: Length of context window
-        p: Order of AR process (used only for future SPD/ILWD hooks)
-        oracle_predictor: Oracle baseline object with predict_next and autoregressive_predict
-        ols_predictor: OLS baseline object with predict_next and autoregressive_predict
-        device: 'cpu' or 'cuda'
-
-    Returns:
-        Dictionary of scalar metrics.
+    - oracle_predictor / ols_predictor can handle the provided batch.
     """
     model.eval()
     model = model.to(device)
 
+    if not torch.is_tensor(test_sequences):
+        test_sequences = torch.as_tensor(test_sequences, dtype=torch.float32)
+    else:
+        test_sequences = test_sequences.float()
+
     n_test, T, d = test_sequences.shape
     test_sequences = test_sequences.to(device)
 
-    # Split into context and target
-    context = test_sequences[:, :context_len, :]          # (n_test, context_len, d)
-    target = test_sequences[:, context_len:, :]           # (n_test, T-context_len, d)
+    context = test_sequences[:, :context_len, :]
+    target = test_sequences[:, context_len:, :]
     n_pred = target.shape[1]
 
-    # ---------- 1-step prediction ----------
     with torch.no_grad():
-        model_output, _ = model(context)
-        model_next = model_output[:, -1, :]               # (n_test, d)
+        out = model(context)
+        model_output = out[0] if isinstance(out, tuple) else out
+        model_next = model_output[:, -1, :]
 
-    oracle_next = oracle_predictor.predict_next(context)  # (n_test, d)
-    ols_next = ols_predictor.predict_next(context)        # (n_test, d)
+    oracle_next = oracle_predictor.predict_next(context)
+    ols_next = ols_predictor.predict_next(context)
+    last_next = context[:, -1, :]
 
     mse_1step = compute_mse(model_next, target[:, 0, :])
     mse_1step_oracle = compute_mse(oracle_next, target[:, 0, :])
     mse_1step_ols = compute_mse(ols_next, target[:, 0, :])
+    mse_1step_last = compute_mse(last_next, target[:, 0, :])
 
-    # ---------- n-step rollout (up to 10) ----------
+    #rollout
     n_rollout = min(10, n_pred)
 
     with torch.no_grad():
@@ -211,27 +188,51 @@ def evaluate_model(
 
     oracle_rollout = oracle_predictor.autoregressive_predict(context, n_steps=n_rollout)
     ols_rollout = ols_predictor.autoregressive_predict(context, n_steps=n_rollout)
+    last_rollout = context[:, -1:, :].repeat(1, n_rollout, 1)
 
     mse_rollout = compute_mse(model_rollout, target[:, :n_rollout, :])
     mse_rollout_oracle = compute_mse(oracle_rollout, target[:, :n_rollout, :])
     mse_rollout_ols = compute_mse(ols_rollout, target[:, :n_rollout, :])
+    mse_rollout_last = compute_mse(last_rollout, target[:, :n_rollout, :])
 
-    # ---------- Relative errors ----------
     rel_error_1step = compute_relative_error(mse_1step, mse_1step_oracle)
     rel_error_rollout = compute_relative_error(mse_rollout, mse_rollout_oracle)
+    rel_error_1step_last = compute_relative_error(mse_1step_last, mse_1step_oracle)
+    rel_error_rollout_last = compute_relative_error(mse_rollout_last, mse_rollout_oracle)
 
     metrics = {
         "mse_1step": mse_1step,
         "mse_1step_oracle": mse_1step_oracle,
         "mse_1step_ols": mse_1step_ols,
+        "mse_1step_last": mse_1step_last,
         "rel_error_1step": rel_error_1step,
+        "rel_error_1step_last": rel_error_1step_last,
         "mse_rollout": mse_rollout,
         "mse_rollout_oracle": mse_rollout_oracle,
         "mse_rollout_ols": mse_rollout_ols,
+        "mse_rollout_last": mse_rollout_last,
         "rel_error_rollout": rel_error_rollout,
+        "rel_error_rollout_last": rel_error_rollout_last,
     }
 
-    # SPD / ILWD can be added later using extract_implicit_weights + true/OLS weights.
+    # SPD / ILWD 
+    if p > 0 and test_weights and len(test_weights) > 0:
+        true_weights = [np.asarray(w) for w in test_weights[0][:p]]
+
+        single_context = context[0].detach().cpu().numpy()
+        ols_weights = fit_ols_weights_from_context(single_context, p)
+
+        implicit_weights = extract_implicit_weights(
+            model,
+            context=context[0:1],
+            p=p,
+        )
+
+        metrics["spd"] = compute_spd(true_weights, implicit_weights)
+        metrics["ilwd"] = compute_ilwd(implicit_weights, ols_weights)
+    else:
+        metrics["spd"] = None
+        metrics["ilwd"] = None
 
     return metrics
 
@@ -244,15 +245,6 @@ def bootstrap_confidence_interval(
 ) -> Tuple[float, float]:
     """
     Compute bootstrap confidence interval for the mean.
-
-    Args:
-        values: 1D array of scalar values
-        confidence: Confidence level (e.g., 0.95 for 95% CI)
-        n_bootstrap: Number of bootstrap resamples
-        seed: Random seed for reproducibility
-
-    Returns:
-        (lower_bound, upper_bound)
     """
     if seed is not None:
         np.random.seed(seed)
