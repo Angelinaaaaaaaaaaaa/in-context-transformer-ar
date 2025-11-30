@@ -5,39 +5,46 @@ Test how prediction accuracy changes as AR order p increases.
 Hypothesis: Transformers achieve near-oracle error (within ≈ 2×) for AR(p) with p ≤ 5,
 with approximately linear degradation for p ∈ [6, 10].
 """
-import torch
-import numpy as np
 import argparse
-import os
 import json
-from tqdm import tqdm
-from typing import Optional, Tuple, List
+import os
+from typing import List, Optional, Tuple
+
+import numpy as np
+import torch
+from tqdm import tqdm  # noqa: F401
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data import generate_ar_dataset
-from models import GPTModel, OraclePredictor, OLSPredictor, LastValuePredictor
-from training import Trainer, ARDataset, evaluate_model
+from data import generate_ar_dataset  # noqa: F401
+from models import GPTModel, OraclePredictor, OLSPredictor
+from training import Trainer, ARDataset
+from training.metrics import evaluate_model
 from analysis import plot_scaling_results
+
 
 def load_dataset(data_dir: str, p: int, seed: int, split: str) -> Tuple[torch.Tensor, List[List[np.ndarray]]]:
     """
-    Helper to load pre-generated data.
-    Filename format: ar_p{p}_seed{seed}_{split}.pt
+    Load pre-generated AR(p) data.
+
+    Expects files: ar_p{p}_seed{seed}_{split}.pt with keys:
+      - "sequences": (N, T, d)
+      - "weights":   length-N list of AR weight lists
     """
     filename = f"ar_p{p}_seed{seed}_{split}.pt"
     path = os.path.join(data_dir, filename)
-    
+
     if not os.path.exists(path):
         raise FileNotFoundError(
             f"Data file not found: {path}\n"
-            f"Please make sure you ran 'generate_data.py' and the data is in '{data_dir}'."
+            f"Please run the data generation script so that cached data "
+            f"is placed in '{data_dir}'."
         )
-        
-    # [FIX]: Add weights_only=False to allow loading numpy arrays
-    data = torch.load(path, weights_only=False) 
+
+    data = torch.load(path, weights_only=False)
     return data["sequences"], data["weights"]
+
 
 def run_experiment(
     p: int,

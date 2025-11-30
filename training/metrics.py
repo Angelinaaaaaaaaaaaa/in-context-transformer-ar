@@ -1,3 +1,9 @@
+"""
+Evaluation metrics for in-context learning:
+- MSE (1-step and n-step rollout)
+- SPD (Squared Parameter Distance)
+- ILWD (Implicit Learning Weight Distance)
+"""
 from typing import List, Tuple, Optional
 
 import numpy as np
@@ -41,7 +47,7 @@ def extract_implicit_weights(
     with torch.enable_grad():
         out = model(context)
         output = out[0] if isinstance(out, tuple) else out
-        next_pred = output[:, -1, :]
+        next_pred = output[:, -1, :]  # (1, d)
 
     implicit_weights: List[np.ndarray] = []
 
@@ -114,22 +120,23 @@ def fit_ols_weights_from_context(
     Y_rows = []
 
     for t in range(p, T_ctx):
-        y_t = context[t]
+        y_t = context[t]  # (d,)
         lags = [context[t - i] for i in range(1, p + 1)]
-        x_t = np.concatenate(lags, axis=-1)
+        x_t = np.concatenate(lags, axis=-1)  # (d * p,)
         X_rows.append(x_t)
         Y_rows.append(y_t)
 
-    X = np.stack(X_rows, axis=0)
-    Y = np.stack(Y_rows, axis=0)
-    coef, *_ = np.linalg.lstsq(X, Y, rcond=None) 
-    W_concat = coef.T
+    X = np.stack(X_rows, axis=0)  # (N, d*p)
+    Y = np.stack(Y_rows, axis=0)  # (N, d)
+
+    coef, *_ = np.linalg.lstsq(X, Y, rcond=None)  # (d*p, d)
+    W_concat = coef.T  # (d, d*p)
 
     ols_weights: List[np.ndarray] = []
     for i in range(p):
         start = i * d
         end = (i + 1) * d
-        W_i = W_concat[:, start:end]
+        W_i = W_concat[:, start:end]  # (d, d)
         ols_weights.append(W_i)
 
     return ols_weights
@@ -162,25 +169,26 @@ def evaluate_model(
     n_test, T, d = test_sequences.shape
     test_sequences = test_sequences.to(device)
 
-    context = test_sequences[:, :context_len, :]
-    target = test_sequences[:, context_len:, :]
+    context = test_sequences[:, :context_len, :]          # (n_test, context_len, d)
+    target = test_sequences[:, context_len:, :]           # (n_test, T-context_len, d)
     n_pred = target.shape[1]
 
+    # ---------- 1-step ----------
     with torch.no_grad():
         out = model(context)
         model_output = out[0] if isinstance(out, tuple) else out
-        model_next = model_output[:, -1, :]
+        model_next = model_output[:, -1, :]               # (n_test, d)
 
-    oracle_next = oracle_predictor.predict_next(context)
-    ols_next = ols_predictor.predict_next(context)
-    last_next = context[:, -1, :]
+    oracle_next = oracle_predictor.predict_next(context)  # (n_test, d)
+    ols_next = ols_predictor.predict_next(context)        # (n_test, d)
+    last_next = context[:, -1, :]                         # naive baseline
 
     mse_1step = compute_mse(model_next, target[:, 0, :])
     mse_1step_oracle = compute_mse(oracle_next, target[:, 0, :])
     mse_1step_ols = compute_mse(ols_next, target[:, 0, :])
     mse_1step_last = compute_mse(last_next, target[:, 0, :])
 
-    #rollout
+    # ---------- n-step rollout (up to 10) ----------
     n_rollout = min(10, n_pred)
 
     with torch.no_grad():
@@ -215,7 +223,7 @@ def evaluate_model(
         "rel_error_rollout_last": rel_error_rollout_last,
     }
 
-    # SPD / ILWD 
+    # ---------- SPD / ILWD on a representative context ----------
     if p > 0 and test_weights and len(test_weights) > 0:
         true_weights = [np.asarray(w) for w in test_weights[0][:p]]
 
