@@ -63,18 +63,33 @@ def train_model(p: int,
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # Generate data
-    print(f"Generating training data...")
-    train_sequences, _ = generate_ar_dataset(
-        n_sequences=n_train, p=p, d=d, T=T, noise_std=0.0,
-        same_dynamics=False, seed=seed
-    )
+    data_dir = 'data/data_cache'
 
-    print(f"Generating validation data...")
-    val_sequences, _ = generate_ar_dataset(
-        n_sequences=n_val, p=p, d=d, T=T, noise_std=0.0,
-        same_dynamics=False, seed=seed + 1
-    )
+    print(f"Loading training data from {data_dir}...")
+    train_path = os.path.join(data_dir, f"ar_p{p}_seed{seed}_train.pt")
+    
+    if not os.path.exists(train_path):
+        raise FileNotFoundError(
+            f"Training data not found: {train_path}\n"
+            f"Please run 'data_gen.py' first to generate the normalized datasets."
+        )
+
+    train_data = torch.load(train_path, weights_only=False)
+    train_sequences = train_data["sequences"]
+
+    print(f"Loading validation data from {data_dir}...")
+    val_path = os.path.join(data_dir, f"ar_p{p}_seed{seed}_val.pt")
+    
+    if not os.path.exists(val_path):
+        raise FileNotFoundError(f"Validation data not found: {val_path}")
+        
+    val_data = torch.load(val_path, weights_only=False)
+    val_sequences = val_data["sequences"]
+
+    if not torch.is_tensor(train_sequences):
+        train_sequences = torch.tensor(train_sequences, dtype=torch.float32)
+    if not torch.is_tensor(val_sequences):
+        val_sequences = torch.tensor(val_sequences, dtype=torch.float32)
 
     # Create datasets
     train_dataset = ARDataset(train_sequences)
@@ -84,8 +99,8 @@ def train_model(p: int,
     model = GPTModel(
         d_input=d,
         d_model=256,
-        n_layers=6,
-        n_heads=8,
+        n_layers=2,
+        n_heads=4,
         d_ff=1024,
         max_seq_len=T,
         dropout=0.1
@@ -105,9 +120,9 @@ def train_model(p: int,
         val_dataset=val_dataset,
         context_len=context_len,
         lr=3e-4,
-        batch_size=64,
-        max_epochs=100,
-        patience=10,
+        batch_size=1280,
+        max_epochs=300,
+        patience=30,
         device=device,
         save_dir=model_save_dir
     )
@@ -150,18 +165,26 @@ def analyze_model(model,
     print(f"{'='*60}")
 
     # Set random seeds
-    np.random.seed(seed + 100)
-    torch.manual_seed(seed + 100)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
     # Generate test data
-    print(f"Generating test data for analysis...")
-    test_sequences, test_weights = generate_ar_dataset(
-        n_sequences=n_test, p=p, d=d, T=T, noise_std=0.0,
-        same_dynamics=False, seed=seed + 100
-    )
-    test_sequences = torch.tensor(test_sequences, dtype=torch.float32)
+    print(f"Loading test data for analysis...")
 
-    # Move model to device
+    data_dir = 'data/data_cache' 
+    
+    filename = f"ar_p{p}_seed{seed}_test.pt"
+    path = os.path.join(data_dir, filename)
+    
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Data file not found: {path}. Please run data_gen.py first.")
+
+    data = torch.load(path, weights_only=False)
+    test_sequences = data["sequences"]
+    test_weights = data["weights"]
+
+    if not torch.is_tensor(test_sequences):
+        test_sequences = torch.tensor(test_sequences, dtype=torch.float32)
     model = model.to(device)
 
     # 1. Analyze head specialization
@@ -296,7 +319,7 @@ def main():
                        help='Number of random seeds')
     parser.add_argument('--d', type=int, default=5,
                        help='State dimension')
-    parser.add_argument('--T', type=int, default=100,
+    parser.add_argument('--T', type=int, default=200,
                        help='Sequence length')
     parser.add_argument('--context_len', type=int, default=70,
                        help='Context window length')

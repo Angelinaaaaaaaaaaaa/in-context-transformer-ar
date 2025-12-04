@@ -13,6 +13,7 @@ import torch
 import argparse
 import numpy as np
 
+# 路径修正：确保能找到 data.ar_process
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
@@ -25,72 +26,82 @@ except ImportError:
     from ar_process import generate_ar_dataset
 
 
-
 def save_dataset(output_dir, filename, sequences, weights):
     path = os.path.join(output_dir, filename)
-    sequences = torch.tensor(sequences, dtype=torch.float32)
+    if not torch.is_tensor(sequences):
+        sequences = torch.tensor(sequences, dtype=torch.float32)
 
-    # 也保存 normalized weights
+    # 保存序列和权重
     torch.save({"sequences": sequences, "weights": weights}, path)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate AR(p) datasets for H1/H2")
 
-    parser.add_argument('--output_dir', type=str, default='data_cache_h1')
+    # 默认目录名保持原脚本的 data_cache_h1
+    parser.add_argument('--output_dir', type=str, default='data_cache', help='Save directory.')
+    
     parser.add_argument('--p_values', type=int, nargs='+', default=[1, 2, 5, 10])
-    parser.add_argument('--seeds', type=int, nargs='+', default=[0,1,2])
+    parser.add_argument('--seeds', type=int, nargs='+', default=[0, 1, 2])
 
     parser.add_argument('--d', type=int, default=5)
-    parser.add_argument('--T', type=int, default=100)
+    parser.add_argument('--T', type=int, default=200)
+    
+    # 保持原脚本的高数据量设置
     parser.add_argument('--n_train', type=int, default=500000)
     parser.add_argument('--n_val', type=int, default=5000)
     parser.add_argument('--n_test', type=int, default=10000)
 
     args = parser.parse_args()
 
-    output = os.path.join(current_dir, args.output_dir)
-    os.makedirs(output, exist_ok=True)
+    # ==========================================
+    # [修改处] 使用第二个脚本的路径处理逻辑
+    # ==========================================
+    # 如果用户没有指定路径（使用默认值），则强制使用当前脚本目录下的绝对路径
+    # 如果用户指定了路径（如 /tmp/data），则使用用户指定的路径
+    if args.output_dir == 'data_cache':
+         full_output_dir = os.path.join(current_dir, 'data_cache')
+    else:
+         full_output_dir = args.output_dir
+
+    os.makedirs(full_output_dir, exist_ok=True)
+    # ==========================================
 
     print("="*60)
-    print("Generating AR(p) datasets")
+    print("Generating AR(p) datasets (Normalized)")
+    print(f"Output Dir: {full_output_dir}")
+    print(f"N_Train:    {args.n_train}")
     print("="*60)
 
     for p in args.p_values:
-        print(f"\n### AR({p}) ###")
+        print(f"\n### Processing AR({p}) ###")
 
         for s in args.seeds:
-            print(f"[seed {s}] generating train/val/test ...")
+            # print(f"  [seed {s}] generating train/val/test ...")
 
             # ========= 1. Generate base data (same_dynamics=True) =========
+            # Train
             train_seq, train_w = generate_ar_dataset(
                 n_sequences=args.n_train, p=p, d=args.d, T=args.T,
                 noise_std=1.0, same_dynamics=False, seed=s
             )
+            # Val
             val_seq, val_w = generate_ar_dataset(
                 n_sequences=args.n_val, p=p, d=args.d, T=args.T,
                 noise_std=1.0, same_dynamics=False, seed=s+1
             )
+            # Test
             test_seq, test_w = generate_ar_dataset(
                 n_sequences=args.n_test, p=p, d=args.d, T=args.T,
-                noise_std=1.0, same_dynamics=True, seed=s+2
+                noise_std=1.0, same_dynamics=False, seed=s+2
             )
 
-            # ========= 2. Normalization using train std =========
-            scale = np.std(train_seq)
-            if scale < 1e-6:
-                raise ValueError("Training std too small, data degenerate!")
+            # ========= 2. Save =========
+            save_dataset(full_output_dir, f"ar_p{p}_seed{s}_train.pt", train_seq, train_w)
+            save_dataset(full_output_dir, f"ar_p{p}_seed{s}_val.pt",   val_seq, val_w)
+            save_dataset(full_output_dir, f"ar_p{p}_seed{s}_test.pt",  test_seq, test_w)
 
-            train_seq /= scale
-            val_seq /= scale
-            test_seq /= scale
-
-            # ========= 3. Save =========
-            save_dataset(output, f"ar_p{p}_seed{s}_train.pt", train_seq, train_w)
-            save_dataset(output, f"ar_p{p}_seed{s}_val.pt",   val_seq, val_w)
-            save_dataset(output, f"ar_p{p}_seed{s}_test.pt",  test_seq, test_w)
-
-    print("\nDone!")
+    print("\nDone! All files generated.")
 
 
 if __name__ == "__main__":

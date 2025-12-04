@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data import generate_ar_dataset  # noqa: F401
 from models import GPTModel, OraclePredictor, OLSPredictor
 from training import Trainer, ARDataset
-from training.metrics import evaluate_model
+from training.metrics import evaluate_model, BatchOraclePredictor
 from analysis import plot_scaling_results
 
 
@@ -115,7 +115,7 @@ def run_experiment(
     print("Training model...")
     history = trainer.train(verbose=True)
 
-    oracle = OraclePredictor(test_weights[0])
+    oracle = BatchOraclePredictor(test_weights, device=device)
     ols = OLSPredictor(p)
 
     print("Evaluating model...")
@@ -231,7 +231,7 @@ def main() -> None:
     parser.add_argument(
         "--T",
         type=int,
-        default=100,
+        default=200,
         help="Sequence length",
     )
     parser.add_argument(
