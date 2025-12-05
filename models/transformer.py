@@ -13,22 +13,40 @@ import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
 
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        
+        # 注册为 buffer，不作为模型参数更新，但随 state_dict 保存
+        self.register_buffer('pe', pe.unsqueeze(0))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (batch, seq_len, d_model)
+        """
+        return x + self.pe[:, :x.size(1), :]
 
 class MultiHeadAttention(nn.Module):
     """Multi-head attention with causal masking."""
 
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
         super().__init__()
-        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
 
         self.d_model = d_model
         self.n_heads = n_heads
-        self.d_head = d_model // n_heads
+        self.d_head = d_model
 
-        self.q_proj = nn.Linear(d_model, d_model)
-        self.k_proj = nn.Linear(d_model, d_model)
-        self.v_proj = nn.Linear(d_model, d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
+        self.q_proj = nn.Linear(d_model, n_heads * self.d_head)
+        self.k_proj = nn.Linear(d_model, n_heads * self.d_head)
+        self.v_proj = nn.Linear(d_model, n_heads * self.d_head)
+        self.out_proj = nn.Linear(n_heads * self.d_head, d_model)
 
         self.dropout = nn.Dropout(dropout)
         self.scale = math.sqrt(self.d_head)
@@ -80,7 +98,7 @@ class MultiHeadAttention(nn.Module):
 
         # Concatenate heads
         attn_output = attn_output.transpose(1, 2).contiguous().view(
-            batch_size, seq_len, d_model
+            batch_size, seq_len, self.n_heads * self.d_head
         )
 
         # Output projection
@@ -122,8 +140,17 @@ class TransformerBlock(nn.Module):
         return_attention: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
 
-        attn_output, attn_weights = self.attention(x, mask, return_attention)
-        x = self.norm2(attn_output)
+        x_norm1 = self.norm1(x)
+        attn_output, attn_weights = self.attention(x_norm1, mask, return_attention)
+        
+        # 2. Residual Connection 
+        x = x + self.dropout(attn_output)
+
+        x_norm2 = self.norm2(x)
+        ff_output = self.ff(x_norm2)
+        
+        # 4. Residual Connection
+        x = x + self.dropout(ff_output)
 
         return x, attn_weights
 
@@ -147,7 +174,7 @@ class GPTModel(nn.Module):
         d_input: int,
         d_model: int = 256,
         n_layers: int = 1,
-        n_heads: int = 2,
+        n_heads: int = 4,
         d_ff: int = 1024,
         max_seq_len: int = 512,
         dropout: float = 0.1,
@@ -164,7 +191,7 @@ class GPTModel(nn.Module):
         self.input_proj = nn.Linear(d_input, d_model)
 
         # Learned positional encoding
-        self.pos_encoding = nn.Embedding(max_seq_len, d_model)
+        self.pos_encoding = SinusoidalPositionalEncoding(d_model, max_seq_len)
 
         # Transformer blocks
         self.blocks = nn.ModuleList(
@@ -174,26 +201,28 @@ class GPTModel(nn.Module):
             ]
         )
 
+        self.ln_f = nn.LayerNorm(d_model)
         # Output projection
         self.output_proj = nn.Linear(d_model, d_input)
 
         self.dropout = nn.Dropout(dropout)
 
         # Initialize weights
-        self._init_weights()
+        self.apply(self._init_weights)
 
-    def _init_weights(self):
-        """Initialize weights following GPT-2 style."""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-                if module.bias is not None:
-                    torch.nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.Embedding):
-                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            elif isinstance(module, nn.LayerNorm):
-                torch.nn.init.ones_(module.weight)
-                torch.nn.init.zeros_(module.bias)
+    def _init_weights(self, module):
+        """
+        Initialize weights:
+        - Linear: Xavier Uniform, Bias=0
+        - LayerNorm: Weight=1, Bias=0
+        """
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
 
     def _create_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         """Create causal mask for autoregressive attention."""
@@ -221,9 +250,7 @@ class GPTModel(nn.Module):
         x = self.input_proj(x)  # (batch, seq_len, d_model)
 
         # Add positional encoding
-        positions = torch.arange(seq_len, device=device).unsqueeze(0)  # (1, seq_len)
-        pos_emb = self.pos_encoding(positions)  # (1, seq_len, d_model)
-        x = x + pos_emb
+        x = self.pos_encoding(x)
         # x = self.dropout(x)
 
         # Create causal mask
@@ -236,6 +263,7 @@ class GPTModel(nn.Module):
             if return_attention:
                 all_attention_weights.append(attn_weights)
 
+        x = self.ln_f(x)
         # Output projection
         output = self.output_proj(x)  # (batch, seq_len, d_input)
 

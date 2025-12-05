@@ -13,6 +13,7 @@ from typing import List, Optional
 class OraclePredictor:
     """
     Oracle predictor that uses ground-truth AR(p) weights.
+    Updated for Zero-Mean AR process.
     """
 
     def __init__(self, weights: List[np.ndarray]):
@@ -24,23 +25,10 @@ class OraclePredictor:
         self.p = len(weights)
         self.d = weights[0].shape[0]
 
-        target_mean_level = 10.0 
-        
-        sum_weights = torch.sum(torch.stack(self.weights), dim=0)
-        I = torch.eye(self.d)
-        mu = torch.ones(self.d) * target_mean_level
-        
-        self.bias = torch.matmul(I - sum_weights, mu)
 
     def predict_next(self, context: torch.Tensor) -> torch.Tensor:
         """
         Predict next state given context.
-
-        Args:
-            context: Context of shape (batch, context_len, d)
-
-        Returns:
-            Next state prediction of shape (batch, d)
         """
         batch_size, context_len, d = context.shape
         device = context.device
@@ -48,12 +36,11 @@ class OraclePredictor:
         assert context_len >= self.p, f"Context length {context_len} must be >= p={self.p}"
 
         # Move weights to same device
-        bias = self.bias.to(device)
         weights = [w.to(device) for w in self.weights]
 
-        # Compute s_t = W1*s_{t-1} + W2*s_{t-2} + ... + Wp*s_{t-p}
-        prediction = bias.unsqueeze(0).repeat(batch_size, 1)
+        prediction = torch.zeros(batch_size, d, device=device)
 
+        # Compute s_t = W1*s_{t-1} + W2*s_{t-2} + ... + Wp*s_{t-p}
         for i, W in enumerate(weights):
             # W @ s_{t-i-1}
             s_lag = context[:, -(i+1), :]  # (batch, d)
@@ -62,50 +49,42 @@ class OraclePredictor:
         return prediction
 
     def autoregressive_predict(self, context: torch.Tensor, n_steps: int) -> torch.Tensor:
-        """
-        Generate n_steps predictions autoregressively.
-
-        Args:
-            context: Initial context of shape (batch, context_len, d)
-            n_steps: Number of steps to predict
-
-        Returns:
-            Predictions of shape (batch, n_steps, d)
-        """
         batch_size = context.shape[0]
         predictions = []
-
-        # Start with context
         current_seq = context.clone()
 
         for _ in range(n_steps):
-            # Predict next state
-            next_state = self.predict_next(current_seq)  # (batch, d)
+            next_state = self.predict_next(current_seq)
             predictions.append(next_state)
-
-            # Append to sequence
-            next_state = next_state.unsqueeze(1)  # (batch, 1, d)
+            next_state = next_state.unsqueeze(1)
             current_seq = torch.cat([current_seq, next_state], dim=1)
 
-        predictions = torch.stack(predictions, dim=1)  # (batch, n_steps, d)
+        predictions = torch.stack(predictions, dim=1)
         return predictions
 
 
 class OLSPredictor:
     """
     Ordinary Least Squares predictor that fits AR(p) on the context window.
+    (Updated to use Ridge Regression internally for stability)
     """
 
-    def __init__(self, p: int):
+    def __init__(self, p: int, ridge_alpha: float = 10.0):
         """
         Args:
             p: Order of AR process
+            ridge_alpha: L2 regularization strength. 
+                         0.1 ~ 1.0 is usually good for small data.
+                         If 0.0, it behaves closer to pure OLS (but using solve instead of lstsq).
         """
         self.p = p
+        self.ridge_alpha = ridge_alpha
 
     def _fit_ols(self, sequence: torch.Tensor) -> List[torch.Tensor]:
         """
-        Fit AR(p) model using OLS.
+        Fit AR(p) model using Ridge Regression (Closed form solution).
+        
+        Solving for W in: (X^T X + alpha * I) W^T = X^T Y
 
         Args:
             sequence: Sequence of shape (seq_len, d)
@@ -114,35 +93,55 @@ class OLSPredictor:
             List of fitted weight matrices [W1, ..., Wp]
         """
         seq_len, d = sequence.shape
+        device = sequence.device
 
+        # Not enough data
         if seq_len <= self.p:
-            # Not enough data, return zero weights
-            return [torch.zeros(d, d, device=sequence.device) for _ in range(self.p)]
+            return [torch.zeros(d, d, device=device) for _ in range(self.p)]
 
-        # Construct design matrix X and target Y
-        X = []
-        Y = []
+        # 1. Construct design matrix X and target Y
+        X_list = []
+        Y_list = []
 
         for t in range(self.p, seq_len):
-            # Stack past p states
+            # Flatten past p states: [s_{t-1}, ..., s_{t-p}]
+            # Shape: (p * d)
             x_t = torch.cat([sequence[t - i - 1] for i in range(self.p)])
-            X.append(x_t)
-            Y.append(sequence[t])
+            X_list.append(x_t)
+            Y_list.append(sequence[t])
 
-        X = torch.stack(X)  # Shape: (seq_len-p, p*d)
-        Y = torch.stack(Y)  # Shape: (seq_len-p, d)
+        X = torch.stack(X_list)  # Shape: (N_samples, p*d)
+        Y = torch.stack(Y_list)  # Shape: (N_samples, d)
 
-        # Solve least squares: Y = X @ W_flat^T
-        # Use pseudo-inverse for numerical stability
+        # 2. Ridge Regression: W^T = (X^T X + alpha I)^-1 X^T Y
+        # We need to solve for weights. 
+        # X: (N, K), Y: (N, d) -> Weights should be (d, K)
+        
+        N, K = X.shape # K = p*d
+        
+        # Compute X^T X (covariance matrix of features)
+        XTX = torch.matmul(X.T, X)  # (K, K)
+        
+        # Add Ridge Regularization (alpha * Identity)
+        I_mat = torch.eye(K, device=device)
+        XTX_reg = XTX + self.ridge_alpha * I_mat
+
+        # Compute X^T Y
+        XTY = torch.matmul(X.T, Y)  # (K, d)
+
         try:
-            W_flat = torch.linalg.lstsq(X, Y, rcond=None).solution.T  # Shape: (d, p*d)
-        except:
-            # Fallback if lstsq fails
-            W_flat = torch.zeros(d, self.p * d, device=sequence.device)
+            # Solve linear system: A * Z = B  =>  Z = A^-1 B
+            # Where Z is W^T (shape K, d)
+            W_transposed = torch.linalg.solve(XTX_reg, XTY)
+            W_flat = W_transposed.T  # Shape: (d, p*d)
+        except RuntimeError:
+            # Fallback if solver fails (very rare with Ridge)
+            W_flat = torch.zeros(d, self.p * d, device=device)
 
-        # Reshape to list of weight matrices
+        # 3. Reshape to list of weight matrices [W1, ..., Wp]
         fitted_weights = []
         for i in range(self.p):
+            # Extract W_i corresponding to lag i+1
             W_i = W_flat[:, i*d:(i+1)*d]
             fitted_weights.append(W_i)
 
@@ -164,7 +163,7 @@ class OLSPredictor:
         predictions = []
 
         for b in range(batch_size):
-            # Fit OLS on this sequence
+            # Fit OLS (actually Ridge) on this sequence
             weights = self._fit_ols(context[b])
 
             # Predict next state
@@ -172,6 +171,12 @@ class OLSPredictor:
             for i, W in enumerate(weights):
                 if context_len > i:
                     s_lag = context[b, -(i+1), :]
+                    # Model: s_t = Sum(W_i @ s_{t-i})
+                    # Implementation detail: 
+                    # If s_lag is 1D (d,), W is (d,d), we want output (d,)
+                    # torch.matmul(W, s_lag) is correct.
+                    # Previous code used matmul(s_lag, W.T) which is mathematically equivalent
+                    # if s_lag is treated as row vector. We keep consistent with W shape.
                     prediction += torch.matmul(s_lag, W.T)
 
             predictions.append(prediction)
@@ -181,13 +186,6 @@ class OLSPredictor:
     def autoregressive_predict(self, context: torch.Tensor, n_steps: int) -> torch.Tensor:
         """
         Generate n_steps predictions autoregressively.
-
-        Args:
-            context: Initial context of shape (batch, context_len, d)
-            n_steps: Number of steps to predict
-
-        Returns:
-            Predictions of shape (batch, n_steps, d)
         """
         batch_size = context.shape[0]
         predictions = []
