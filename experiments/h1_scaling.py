@@ -151,7 +151,7 @@ def run_experiment(
         print(f"ILWD (implicit vs OLS):  {metrics['ilwd']:.6f}")
 
     if save_dir is not None:
-        results_path = os.path.join(model_save_dir, "metrics.json")
+        results_path = os.path.join(model_save_dir, "try_metrics.json")
         serializable_metrics = {
             k: v for k, v in metrics.items() if k != "training_history"
         }
