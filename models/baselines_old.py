@@ -84,15 +84,30 @@ class OraclePredictor:
 
 class OLSPredictor:
     """
-    Ordinary Least Squares predictor that fits AR(p) on the context window.
+    OLS AR(p) estimator using Ridge Regression, with fixed alphas per p.
     """
 
-    def __init__(self, p: int):
+    BEST_ALPHA = {
+        1: 20.0,
+        2: 25.0,
+        5: 25.0,
+        10: 25.0,
+    }
+
+    def __init__(self, p: int, ridge_alpha: float = None):
         """
-        Args:
-            p: Order of AR process
+        If ridge_alpha is None, automatically assign the best one for the given p.
         """
         self.p = p
+
+        if ridge_alpha is None:
+            if p in self.BEST_ALPHA:
+                self.ridge_alpha = self.BEST_ALPHA[p]
+            else:
+                raise ValueError(f"No default alpha known for p={p}. "
+                                 f"Provide ridge_alpha manually.")
+        else:
+            self.ridge_alpha = ridge_alpha
 
     def _fit_ols(self, sequence: torch.Tensor) -> List[torch.Tensor]:
         """
